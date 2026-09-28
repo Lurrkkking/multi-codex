@@ -1,12 +1,12 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 68900517ab94b3952c535ad06d403f349e9d7533..bcd84b6fdb4b39f0e8d5603ca0d4defe5bc69a89 100644
+index 68900517ab94b3952c535ad06d403f349e9d7533..4d80989b2360441afdf253bcf042b0c309924c9b 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -936,0 +937,3 @@ impl ModelClient {
 +            // Keep provider-bound encrypted state out of requests sent to other
 +            // providers. This only changes the request copy, not the saved transcript.
 +            input.retain(|item| !matches!(item, ResponseItem::Compaction { .. }));
-@@ -939,6 +942,55 @@ impl ModelClient {
+@@ -939,6 +942,67 @@ impl ModelClient {
 -                if let ResponseItem::FunctionCall {
 -                    encrypted_function_args,
 -                    ..
@@ -68,7 +68,19 @@ index 68900517ab94b3952c535ad06d403f349e9d7533..bcd84b6fdb4b39f0e8d5603ca0d4defe
 +                    });
 +                if !has_expected_prefix {
 +                    item.set_id(None);
-@@ -955 +1007,5 @@ impl ModelClient {
++                    // Encrypted reasoning state is bound to the original item ID. Once
++                    // that ID is discarded, replaying the ciphertext can fail OpenAI's
++                    // encrypted-content item-ID verification.
++                    match item {
++                        ResponseItem::Reasoning {
++                            encrypted_content, ..
++                        }
++                        | ResponseItem::ContextCompaction {
++                            encrypted_content, ..
++                        } => *encrypted_content = None,
++                        _ => {}
++                    }
+@@ -955 +1019,5 @@ impl ModelClient {
 -        let include = vec!["reasoning.encrypted_content".to_string()];
 +        let include = if is_openai {
 +            vec!["reasoning.encrypted_content".to_string()]
