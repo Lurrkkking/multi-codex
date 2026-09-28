@@ -1,0 +1,287 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 68900517ab94b3952c535ad06d403f349e9d7533..65b8220c1710c59af466b03721ced0c426c96b21 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -936,0 +937,3 @@ impl ModelClient {
++            // Keep provider-bound encrypted state out of requests sent to other
++            // providers. This only changes the request copy, not the saved transcript.
++            input.retain(|item| !matches!(item, ResponseItem::Compaction { .. }));
+@@ -939,6 +942,35 @@ impl ModelClient {
+-                if let ResponseItem::FunctionCall {
+-                    encrypted_function_args,
+-                    ..
+-                } = item
+-                {
+-                    *encrypted_function_args = None;
++                match item {
++                    ResponseItem::FunctionCall {
++                        encrypted_function_args,
++                        ..
++                    } => *encrypted_function_args = None,
++                    ResponseItem::Reasoning {
++                        encrypted_content, ..
++                    }
++                    | ResponseItem::ContextCompaction {
++                        encrypted_content, ..
++                    } => *encrypted_content = None,
++                    ResponseItem::AgentMessage { content, .. } => {
++                        content.retain(|part| {
++                            !matches!(
++                                part,
++                                codex_protocol::models::AgentMessageInputContent::EncryptedContent {
++                                    ..
++                                }
++                            )
++                        });
++                    }
++                    ResponseItem::FunctionCallOutput { output, .. }
++                    | ResponseItem::CustomToolCallOutput { output, .. } => {
++                        if let Some(content_items) = output.content_items_mut() {
++                            content_items.retain(|content_item| {
++                                !matches!(
++                                    content_item,
++                                    codex_protocol::models::FunctionCallOutputContentItem::EncryptedContent {
++                                        ..
++                                    }
++                                )
++                            });
++                        }
++                    }
++                    _ => {}
+@@ -955 +987,5 @@ impl ModelClient {
+-        let include = vec!["reasoning.encrypted_content".to_string()];
++        let include = if is_openai {
++            vec!["reasoning.encrypted_content".to_string()]
++        } else {
++            Vec::new()
++        };
+diff --git a/codex-rs/tui/src/app/config_persistence.rs b/codex-rs/tui/src/app/config_persistence.rs
+index d04b74576dfa4f2a81e2b824447bd19137efac06..b5d765468309cff4f556c4989f4fe94cfd563fff 100644
+--- a/codex-rs/tui/src/app/config_persistence.rs
++++ b/codex-rs/tui/src/app/config_persistence.rs
+@@ -32,2 +32,2 @@ pub(super) fn resume_model_settings_for_overrides(
+-    config: &Config,
+-    harness_overrides: &ConfigOverrides,
++    _config: &Config,
++    _harness_overrides: &ConfigOverrides,
+@@ -35,20 +35,3 @@ pub(super) fn resume_model_settings_for_overrides(
+-    let has_layer_override = config.config_layer_stack.layers_high_to_low().any(|layer| {
+-        matches!(
+-            &layer.name,
+-            ConfigLayerSource::SessionFlags
+-                | ConfigLayerSource::User {
+-                    profile: Some(_),
+-                    ..
+-                }
+-        ) && ["model", "model_provider", "model_reasoning_effort"]
+-            .iter()
+-            .any(|key| layer.config.get(*key).is_some())
+-    });
+-    if harness_overrides.model.is_some()
+-        || harness_overrides.model_provider.is_some()
+-        || has_layer_override
+-    {
+-        crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig
+-    } else {
+-        crate::app_server_session::ResumeModelSettings::RestoreFromThread
+-    }
++    // A resume uses the configuration of the launcher that selected it. This
++    // lets one provider take over another provider's transcript in place.
++    crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig
+@@ -1548,65 +1531,2 @@ mod tests {
+-    async fn resume_model_settings_preserves_only_explicit_model_overrides() {
+-        let mut app = make_test_app().await;
+-
+-        assert_eq!(
+-            app.resume_model_settings(),
+-            crate::app_server_session::ResumeModelSettings::RestoreFromThread
+-        );
+-        let profile_path = test_path_buf("/tmp/work.config.toml").abs();
+-        let profile = "work"
+-            .parse::<codex_config::ProfileV2Name>()
+-            .expect("valid profile name");
+-        for (key, expected) in [
+-            (
+-                "model",
+-                crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig,
+-            ),
+-            (
+-                "model_provider",
+-                crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig,
+-            ),
+-            (
+-                "model_reasoning_effort",
+-                crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig,
+-            ),
+-            (
+-                "sandbox_mode",
+-                crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+-            ),
+-        ] {
+-            let config = TomlValue::Table(toml::map::Map::from_iter([(
+-                key.to_string(),
+-                TomlValue::String("value".to_string()),
+-            )]));
+-            app.config.config_layer_stack = ConfigLayerStack::new(
+-                vec![ConfigLayerEntry::new(
+-                    ConfigLayerSource::SessionFlags,
+-                    config.clone(),
+-                )],
+-                Default::default(),
+-                Default::default(),
+-            )
+-            .expect("session flags layer stack");
+-            assert_eq!(app.resume_model_settings(), expected);
+-
+-            app.config.config_layer_stack = ConfigLayerStack::default()
+-                .with_user_config_profile(&profile_path, Some(&profile), config)
+-                .expect("user config profile layer stack");
+-            assert_eq!(app.resume_model_settings(), expected);
+-        }
+-
+-        app.config.config_layer_stack = ConfigLayerStack::default()
+-            .with_user_config(
+-                &profile_path,
+-                TomlValue::Table(toml::map::Map::from_iter([(
+-                    "model_reasoning_effort".to_string(),
+-                    TomlValue::String("high".to_string()),
+-                )])),
+-            )
+-            .expect("user config layer stack");
+-        assert_eq!(
+-            app.resume_model_settings(),
+-            crate::app_server_session::ResumeModelSettings::RestoreFromThread
+-        );
+-
+-        app.harness_overrides.model_provider = Some("custom-provider".to_string());
++    async fn resume_model_settings_uses_the_current_launcher_configuration() {
++        let app = make_test_app().await;
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index 7fc9161a24829958904853ebcaa7f7291a45639a..b200334c250bb6e33d9d3aff5f9898ea2fbcf8d6 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -433,0 +434 @@ impl App {
++                    /*include_all_providers*/ true,
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index a08ccd859c21aaa0f17dd06eef7742a1651a7145..743450f189c0820c1dae4b4803bffe47fb7333ce 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -776,0 +777 @@ async fn lookup_session_target_with_app_server(
++    include_all_providers: bool,
+@@ -806,2 +807,6 @@ async fn lookup_session_target_with_app_server(
+-    let model_provider =
+-        (!app_server.uses_remote_workspace()).then_some(config.model_provider_id.as_str());
++    let model_providers = if include_all_providers {
++        // `None` asks the server to use its configured default provider.
++        Some(Vec::new())
++    } else {
++        (!app_server.uses_remote_workspace()).then(|| vec![config.model_provider_id.clone()])
++    };
+@@ -814 +819 @@ async fn lookup_session_target_with_app_server(
+-        model_provider,
++        model_providers,
+@@ -825,0 +831 @@ async fn lookup_latest_session_target_with_app_server(
++    include_all_providers: bool,
+@@ -838,0 +845 @@ async fn lookup_latest_session_target_with_app_server(
++                include_all_providers,
+@@ -866,0 +874 @@ fn latest_session_lookup_params(
++    include_all_providers: bool,
+@@ -875 +883,4 @@ fn latest_session_lookup_params(
+-        model_providers: if uses_remote_workspace {
++        model_providers: if include_all_providers {
++            // An empty list, unlike `None`, disables the server's default-provider filter.
++            Some(Vec::new())
++        } else if uses_remote_workspace {
+@@ -1448 +1459,6 @@ async fn run_ratatui_app(
+-                    lookup_session_target_with_app_server(startup_app_server, &config, id_str),
++                    lookup_session_target_with_app_server(
++                        startup_app_server,
++                        &config,
++                        id_str,
++                        /*include_all_providers*/ false,
++                    ),
+@@ -1491,0 +1508 @@ async fn run_ratatui_app(
++                        /*include_all_providers*/ false,
+@@ -1550 +1567,6 @@ async fn run_ratatui_app(
+-                lookup_session_target_with_app_server(startup_app_server, &config, id_str),
++                lookup_session_target_with_app_server(
++                    startup_app_server,
++                    &config,
++                    id_str,
++                    /*include_all_providers*/ true,
++                ),
+@@ -1590,0 +1613 @@ async fn run_ratatui_app(
++                    /*include_all_providers*/ true,
+@@ -3211,0 +3235 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ false,
+@@ -3230,0 +3255 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ false,
+@@ -3255,0 +3281 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ false,
+@@ -3278,0 +3305 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ false,
+@@ -3298,0 +3326 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ false,
+@@ -3326,0 +3355 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ false,
+@@ -3438,0 +3468 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ false,
+@@ -3454,0 +3485 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ false,
+@@ -3467,0 +3499 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ false,
+@@ -3515,0 +3548 @@ requires_openai_auth = {requires_openai_auth}
++            /*include_all_providers*/ true,
+diff --git a/codex-rs/tui/src/named_session_lookup.rs b/codex-rs/tui/src/named_session_lookup.rs
+index c9ee45892491f09d742e2f087786c4db87afa910..754744bb3ceb6b378a823a6b9d4b651d3d168a20 100644
+--- a/codex-rs/tui/src/named_session_lookup.rs
++++ b/codex-rs/tui/src/named_session_lookup.rs
+@@ -54 +54 @@ pub(super) async fn lookup(
+-    model_provider: Option<&str>,
++    model_providers: Option<Vec<String>>,
+@@ -77 +77 @@ pub(super) async fn lookup(
+-                        model_providers: model_provider.map(|provider| vec![provider.to_string()]),
++                        model_providers: model_providers.clone(),
+diff --git a/codex-rs/tui/src/resume_picker.rs b/codex-rs/tui/src/resume_picker.rs
+index 5a976e468d28272a101167ec6603d18c8a9a7cb6..c83466c382f7dd05a3b44cfa4254d82556f04157 100644
+--- a/codex-rs/tui/src/resume_picker.rs
++++ b/codex-rs/tui/src/resume_picker.rs
+@@ -444 +444,3 @@ async fn run_resume_picker_with_launch_context(
+-    let provider_filter = picker_provider_filter(config, uses_remote_workspace);
++    // Resume can take over a transcript created by any launcher. The selected
++    // thread is resumed with this launcher's current model/provider settings.
++    let provider_filter = ProviderFilter::Any;
+@@ -2063 +2065,3 @@ fn thread_list_params(
+-            ProviderFilter::Any => None,
++            // thread/list interprets `null` as the server's configured default provider.
++            // An explicitly empty list is the protocol's no-provider-filter value.
++            ProviderFilter::Any => Some(Vec::new()),
+@@ -3871,0 +3876 @@ mod tests {
++            /*include_all_providers*/ false,
+@@ -3882,0 +3888 @@ mod tests {
++                /*include_all_providers*/ false,
+@@ -4299 +4305 @@ mod tests {
+-    fn remote_thread_list_params_omit_provider_filter() {
++    fn thread_list_params_request_all_providers_explicitly() {
+@@ -4311 +4317 @@ mod tests {
+-        assert_eq!(params.model_providers, None);
++        assert_eq!(params.model_providers, Some(Vec::new()));
+@@ -4335 +4341 @@ mod tests {
+-        assert_eq!(params.model_providers, None);
++        assert_eq!(params.model_providers, Some(Vec::new()));
+diff --git a/codex-rs/tui/src/worktree_startup.rs b/codex-rs/tui/src/worktree_startup.rs
+index a3e1f3b3a46d6d79d0c0c9ded201226472efbd78..0b4e451e1ee995e1719d074ac4c3533f9b06f56d 100644
+--- a/codex-rs/tui/src/worktree_startup.rs
++++ b/codex-rs/tui/src/worktree_startup.rs
+@@ -171,3 +171,8 @@ pub(super) async fn prepare(
+-            let target = lookup_session_target_with_app_server(&mut lookup, &source, id_or_name)
+-                .await?
+-                .ok_or_else(|| color_eyre::eyre::eyre!("Session not found: {id_or_name}"))?;
++            let target = lookup_session_target_with_app_server(
++                &mut lookup,
++                &source,
++                id_or_name,
++                /*include_all_providers*/ false,
++            )
++            .await?
++            .ok_or_else(|| color_eyre::eyre::eyre!("Session not found: {id_or_name}"))?;
