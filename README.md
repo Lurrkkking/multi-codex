@@ -6,7 +6,7 @@
 
 补丁位于 [`patches/codex-0.157.1-cross-provider-resume.patch`](patches/codex-0.157.1-cross-provider-resume.patch)，基于 `openai/codex` 的 `rust-v0.157.1` 标签，基线提交为 `36650394c5b38c2990ccf2a3457165ca3e9d9726`。
 
-它允许 `/resume`、`/resume <名称>` 和 `codex resume --last` 查询其他 provider 创建的会话。恢复时使用当前启动器的 provider 和模型，沿用原 session ID 原地继续，不创建 fork。对非 OpenAI provider 发送请求时，会移除 OpenAI 专用的加密状态；本地会话记录本身不会被改写。
+它允许 `/resume`、`/resume <名称>` 和 `codex resume --last` 查询其他 provider 创建的会话。恢复时使用当前启动器的 provider 和模型，沿用原 session ID 原地继续，不创建 fork。跨 provider 请求会清理目标 provider 不接受的加密状态；恢复到 OpenAI 时，也会从请求副本中移除与项目类型不匹配的历史 item ID（例如通用的 `item_…`），避免 API 因 ID 前缀校验拒绝整段历史。本地会话记录本身不会被改写。
 
 会话列表仍沿用 Codex 的工作目录筛选行为；需要查看其他工作目录的会话时使用 picker 的全局显示选项。
 

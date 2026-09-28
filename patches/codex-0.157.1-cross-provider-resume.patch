@@ -1,12 +1,12 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 68900517ab94b3952c535ad06d403f349e9d7533..65b8220c1710c59af466b03721ced0c426c96b21 100644
+index 68900517ab94b3952c535ad06d403f349e9d7533..bcd84b6fdb4b39f0e8d5603ca0d4defe5bc69a89 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -936,0 +937,3 @@ impl ModelClient {
 +            // Keep provider-bound encrypted state out of requests sent to other
 +            // providers. This only changes the request copy, not the saved transcript.
 +            input.retain(|item| !matches!(item, ResponseItem::Compaction { .. }));
-@@ -939,6 +942,35 @@ impl ModelClient {
+@@ -939,6 +942,55 @@ impl ModelClient {
 -                if let ResponseItem::FunctionCall {
 -                    encrypted_function_args,
 -                    ..
@@ -48,7 +48,27 @@ index 68900517ab94b3952c535ad06d403f349e9d7533..65b8220c1710c59af466b03721ced0c4
 +                        }
 +                    }
 +                    _ => {}
-@@ -955 +987,5 @@ impl ModelClient {
++                }
++            }
++        }
++        if is_openai {
++            // OpenAI validates item IDs against the item type (for example, `rs_` for
++            // reasoning). Compatible providers can persist generic IDs such as `item_`;
++            // clear only mismatched IDs from the request copy before replaying that history.
++            for item in &mut input {
++                let Some(expected_prefix) = item.id_prefix() else {
++                    continue;
++                };
++                let Some(id) = item.id() else {
++                    continue;
++                };
++                let has_expected_prefix =
++                    id.as_str().split_once('_').is_some_and(|(prefix, suffix)| {
++                        prefix == expected_prefix && !suffix.is_empty()
++                    });
++                if !has_expected_prefix {
++                    item.set_id(None);
+@@ -955 +1007,5 @@ impl ModelClient {
 -        let include = vec!["reasoning.encrypted_content".to_string()];
 +        let include = if is_openai {
 +            vec!["reasoning.encrypted_content".to_string()]
