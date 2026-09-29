@@ -1,12 +1,27 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 68900517ab94b3952c535ad06d403f349e9d7533..9cb9da5cfc2410357994cf8d7cf706890f60de8f 100644
+index 6890051..404520a 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -268,0 +269 @@ pub struct ModelClient {
+@@ -266,6 +266,7 @@ pub struct ModelClient {
+     event_sender: Option<Sender<ProtocolEvent>>,
+     http_client_factory: HttpClientFactory,
+     restored_history: bool,
 +    strip_foreign_encrypted_content: bool,
-@@ -544,0 +546 @@ impl ModelClient {
+ }
+ 
+ /// A turn-scoped streaming session created from a [`ModelClient`].
+@@ -542,6 +543,7 @@ impl ModelClient {
+             event_sender: None,
+             http_client_factory,
+             restored_history: false,
 +            strip_foreign_encrypted_content: false,
-@@ -558,0 +561,8 @@ impl ModelClient {
+         }
+     }
+ 
+@@ -556,6 +558,14 @@ impl ModelClient {
+         self
+     }
+ 
 +    pub(crate) fn with_foreign_encrypted_content(
 +        mut self,
 +        strip_foreign_encrypted_content: bool,
@@ -15,7 +30,13 @@ index 68900517ab94b3952c535ad06d403f349e9d7533..9cb9da5cfc2410357994cf8d7cf70689
 +        self
 +    }
 +
-@@ -935,0 +946,45 @@ impl ModelClient {
+     pub(crate) fn with_session_context(
+         mut self,
+         prompt_cache_key_override: Option<String>,
+@@ -933,15 +943,92 @@ impl ModelClient {
+                 Some(create_tools_raw_json_for_responses_api(&prompt.tools)?.into()),
+             )
+         };
 +        if !is_openai || self.strip_foreign_encrypted_content {
 +            // Keep provider-bound encrypted state out of requests sent to another provider.
 +            // Cross-provider resume also needs this when the destination is OpenAI: the source
@@ -61,7 +82,16 @@ index 68900517ab94b3952c535ad06d403f349e9d7533..9cb9da5cfc2410357994cf8d7cf70689
 +                }
 +            }
 +        }
-@@ -939,6 +994,31 @@ impl ModelClient {
++        // Reasoning `content` is response-side data. Do not replay it as request input; retain
++        // the summary and encrypted state rules above, but omit this field from the request copy.
++        for item in &mut input {
++            if let ResponseItem::Reasoning { content, .. } = item {
++                *content = None;
++            }
++        }
+         if !is_openai {
+             for item in &mut input {
+                 item.clear_internal_chat_message_metadata_passthrough();
 -                if let ResponseItem::FunctionCall {
 -                    encrypted_function_args,
 -                    ..
@@ -99,26 +129,44 @@ index 68900517ab94b3952c535ad06d403f349e9d7533..9cb9da5cfc2410357994cf8d7cf70689
 +                        } => *encrypted_content = None,
 +                        _ => {}
 +                    }
-@@ -955 +1035,5 @@ impl ModelClient {
+                 }
+             }
+         }
+@@ -952,7 +1039,11 @@ impl ModelClient {
+         .then_some(StreamOptions {
+             reasoning_summary_delivery: codex_api::ReasoningSummaryDelivery::SequentialCutoff,
+         });
 -        let include = vec!["reasoning.encrypted_content".to_string()];
 +        let include = if is_openai {
 +            vec!["reasoning.encrypted_content".to_string()]
 +        } else {
 +            Vec::new()
 +        };
+         let verbosity = if model_info.support_verbosity {
+             self.state.model_verbosity.or(model_info.default_verbosity)
+         } else {
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index da91f5ed346d7e26d7f290b7bae447e97c034715..a342889c693107bcc21bb3261de515f44cee297a 100644
+index da91f5e..a342889 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -1727,0 +1728,3 @@ impl Session {
+@@ -1725,6 +1725,9 @@ impl Session {
+                     &initial_history,
+                     InitialHistory::Resumed(_) | InitialHistory::Forked(_)
+                 ))
 +                .with_foreign_encrypted_content(
 +                    initial_history.has_foreign_provider_history(&config.model_provider_id),
 +                )
+                 .with_session_context(
+                     crate::guardian::prompt_cache_key_override_for_review_session(
+                         &session_configuration.session_source,
 diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
-index 9da17e4cc70e25d051a2e8ba24b468010094dd0f..ec5b1918431ebdf6976079c037ae7873ce582d93 100644
+index 9da17e4..ec5b191 100644
 --- a/codex-rs/history/src/lib.rs
 +++ b/codex-rs/history/src/lib.rs
-@@ -372,0 +373,19 @@ impl InitialHistory {
+@@ -370,6 +370,25 @@ impl InitialHistory {
+         }
+     }
+ 
 +    /// Returns the provider recorded for the source session, when available.
 +    pub fn get_model_provider(&self) -> Option<&str> {
 +        self.get_rollout_items().iter().find_map(|item| match item {
@@ -138,16 +186,22 @@ index 9da17e4cc70e25d051a2e8ba24b468010094dd0f..ec5b1918431ebdf6976079c037ae7873
 +                .is_none_or(|source_provider| source_provider != current_provider)
 +    }
 +
+     pub fn get_event_msgs(&self) -> Option<Vec<EventMsg>> {
+         match self {
+             Self::New | Self::Cleared => None,
 diff --git a/codex-rs/tui/src/app/config_persistence.rs b/codex-rs/tui/src/app/config_persistence.rs
-index d04b74576dfa4f2a81e2b824447bd19137efac06..b5d765468309cff4f556c4989f4fe94cfd563fff 100644
+index d04b745..b5d7654 100644
 --- a/codex-rs/tui/src/app/config_persistence.rs
 +++ b/codex-rs/tui/src/app/config_persistence.rs
-@@ -32,2 +32,2 @@ pub(super) fn resume_model_settings_for_overrides(
+@@ -29,29 +29,12 @@ async fn build_config_on_runtime_worker(
+ }
+ 
+ pub(super) fn resume_model_settings_for_overrides(
 -    config: &Config,
 -    harness_overrides: &ConfigOverrides,
 +    _config: &Config,
 +    _harness_overrides: &ConfigOverrides,
-@@ -35,20 +35,3 @@ pub(super) fn resume_model_settings_for_overrides(
+ ) -> crate::app_server_session::ResumeModelSettings {
 -    let has_layer_override = config.config_layer_stack.layers_high_to_low().any(|layer| {
 -        matches!(
 -            &layer.name,
@@ -171,7 +225,13 @@ index d04b74576dfa4f2a81e2b824447bd19137efac06..b5d765468309cff4f556c4989f4fe94c
 +    // A resume uses the configuration of the launcher that selected it. This
 +    // lets one provider take over another provider's transcript in place.
 +    crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig
-@@ -1548,65 +1531,2 @@ mod tests {
+ }
+ 
+ pub(super) fn has_explicit_resume_permission_override(
+@@ -1545,71 +1528,8 @@ mod tests {
+     }
+ 
+     #[tokio::test]
 -    async fn resume_model_settings_preserves_only_explicit_model_overrides() {
 -        let mut app = make_test_app().await;
 -
@@ -239,19 +299,37 @@ index d04b74576dfa4f2a81e2b824447bd19137efac06..b5d765468309cff4f556c4989f4fe94c
 -        app.harness_overrides.model_provider = Some("custom-provider".to_string());
 +    async fn resume_model_settings_uses_the_current_launcher_configuration() {
 +        let app = make_test_app().await;
+         assert_eq!(
+             app.resume_model_settings(),
+             crate::app_server_session::ResumeModelSettings::OverrideFromCurrentConfig
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 7fc9161a24829958904853ebcaa7f7291a45639a..b200334c250bb6e33d9d3aff5f9898ea2fbcf8d6 100644
+index 7fc9161..b200334 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -433,0 +434 @@ impl App {
+@@ -431,6 +431,7 @@ impl App {
+                     app_server,
+                     &self.config,
+                     &id_or_name,
 +                    /*include_all_providers*/ true,
+                 )
+                 .await
+                 {
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index a08ccd859c21aaa0f17dd06eef7742a1651a7145..743450f189c0820c1dae4b4803bffe47fb7333ce 100644
+index a08ccd8..743450f 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -776,0 +777 @@ async fn lookup_session_target_with_app_server(
+@@ -774,6 +774,7 @@ async fn lookup_session_target_with_app_server(
+     app_server: &mut AppServerSession,
+     config: &Config,
+     id_or_name: &str,
 +    include_all_providers: bool,
-@@ -806,2 +807,6 @@ async fn lookup_session_target_with_app_server(
+ ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
+     if Uuid::parse_str(id_or_name).is_ok() {
+         let thread_id = match ThreadId::from_string(id_or_name) {
+@@ -803,15 +804,19 @@ async fn lookup_session_target_with_app_server(
+         };
+     }
+ 
 -    let model_provider =
 -        (!app_server.uses_remote_workspace()).then_some(config.model_provider_id.as_str());
 +    let model_providers = if include_all_providers {
@@ -260,22 +338,57 @@ index a08ccd859c21aaa0f17dd06eef7742a1651a7145..743450f189c0820c1dae4b4803bffe47
 +    } else {
 +        (!app_server.uses_remote_workspace()).then(|| vec![config.model_provider_id.clone()])
 +    };
-@@ -814 +819 @@ async fn lookup_session_target_with_app_server(
+     Ok(named_session_lookup::lookup(
+         app_server,
+         config.codex_home.as_path(),
+         id_or_name,
+         &[named_session_lookup::SessionCollection::Active],
+         &[resume_source_kinds(/*include_non_interactive*/ false)],
 -        model_provider,
 +        model_providers,
-@@ -825,0 +831 @@ async fn lookup_latest_session_target_with_app_server(
+     )
+     .await?
+     .and_then(session_target_from_app_server_thread))
+@@ -823,6 +828,7 @@ async fn lookup_latest_session_target_with_app_server(
+     config: &Config,
+     cwd_filter: Option<&Path>,
+     include_non_interactive: bool,
 +    include_all_providers: bool,
-@@ -838,0 +845 @@ async fn lookup_latest_session_target_with_app_server(
+ ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
+     let uses_remote_workspace = app_server.uses_remote_workspace();
+     for lookup_mode in [
+@@ -836,6 +842,7 @@ async fn lookup_latest_session_target_with_app_server(
+                 config,
+                 cwd_filter,
+                 include_non_interactive,
 +                include_all_providers,
-@@ -866,0 +874 @@ fn latest_session_lookup_params(
+                 lookup_mode,
+             ))
+             .await?;
+@@ -864,6 +871,7 @@ fn latest_session_lookup_params(
+     config: &Config,
+     cwd_filter: Option<&Path>,
+     include_non_interactive: bool,
 +    include_all_providers: bool,
-@@ -875 +883,4 @@ fn latest_session_lookup_params(
+     lookup_mode: LatestSessionLookupMode,
+ ) -> ThreadListParams {
+     ThreadListParams {
+@@ -872,7 +880,10 @@ fn latest_session_lookup_params(
+         limit: Some(1),
+         sort_key: Some(AppServerThreadSortKey::UpdatedAt),
+         sort_direction: None,
 -        model_providers: if uses_remote_workspace {
 +        model_providers: if include_all_providers {
 +            // An empty list, unlike `None`, disables the server's default-provider filter.
 +            Some(Vec::new())
 +        } else if uses_remote_workspace {
-@@ -1448 +1459,6 @@ async fn run_ratatui_app(
+             None
+         } else {
+             Some(vec![config.model_provider_id.clone()])
+@@ -1445,7 +1456,12 @@ async fn run_ratatui_app(
+             let lookup = startup_draft
+                 .run_until(
+                     &mut tui,
 -                    lookup_session_target_with_app_server(startup_app_server, &config, id_str),
 +                    lookup_session_target_with_app_server(
 +                        startup_app_server,
@@ -283,9 +396,21 @@ index a08ccd859c21aaa0f17dd06eef7742a1651a7145..743450f189c0820c1dae4b4803bffe47
 +                        id_str,
 +                        /*include_all_providers*/ false,
 +                    ),
-@@ -1491,0 +1508 @@ async fn run_ratatui_app(
+                 )
+                 .await;
+             let target_session = match lookup {
+@@ -1489,6 +1505,7 @@ async fn run_ratatui_app(
+                         &config,
+                         filter_cwd,
+                         /*include_non_interactive*/ false,
 +                        /*include_all_providers*/ false,
-@@ -1550 +1567,6 @@ async fn run_ratatui_app(
+                     ),
+                 )
+                 .await;
+@@ -1547,7 +1564,12 @@ async fn run_ratatui_app(
+         let lookup = startup_draft
+             .run_until(
+                 &mut tui,
 -                lookup_session_target_with_app_server(startup_app_server, &config, id_str),
 +                lookup_session_target_with_app_server(
 +                    startup_app_server,
@@ -293,70 +418,196 @@ index a08ccd859c21aaa0f17dd06eef7742a1651a7145..743450f189c0820c1dae4b4803bffe47
 +                    id_str,
 +                    /*include_all_providers*/ true,
 +                ),
-@@ -1590,0 +1613 @@ async fn run_ratatui_app(
+             )
+             .await;
+         let target_session = match lookup {
+@@ -1588,6 +1610,7 @@ async fn run_ratatui_app(
+                     &config,
+                     filter_cwd,
+                     cli.resume_include_non_interactive,
 +                    /*include_all_providers*/ true,
-@@ -3211,0 +3235 @@ requires_openai_auth = {requires_openai_auth}
+                 ),
+             )
+             .await;
+@@ -3209,6 +3232,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             Some(cwd.as_path()),
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ false,
-@@ -3230,0 +3255 @@ requires_openai_auth = {requires_openai_auth}
+             LatestSessionLookupMode::StateDbOnly,
+         );
+ 
+@@ -3228,6 +3252,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             Some(cwd.as_path()),
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ false,
-@@ -3255,0 +3281 @@ requires_openai_auth = {requires_openai_auth}
+             LatestSessionLookupMode::ScanAndRepair,
+         );
+         assert!(!scan_params.use_state_db_only);
+@@ -3253,6 +3278,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             Some(cwd.as_path()),
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ false,
-@@ -3278,0 +3305 @@ requires_openai_auth = {requires_openai_auth}
+             LatestSessionLookupMode::StateDbOnly,
+         );
+ 
+@@ -3276,6 +3302,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             /*cwd_filter*/ None,
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ false,
-@@ -3298,0 +3326 @@ requires_openai_auth = {requires_openai_auth}
+             LatestSessionLookupMode::StateDbOnly,
+         );
+ 
+@@ -3296,6 +3323,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             /*cwd_filter*/ None,
+             /*include_non_interactive*/ true,
 +            /*include_all_providers*/ false,
-@@ -3326,0 +3355 @@ requires_openai_auth = {requires_openai_auth}
+             LatestSessionLookupMode::StateDbOnly,
+         );
+ 
+@@ -3324,6 +3352,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             Some(cwd),
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ false,
-@@ -3438,0 +3468 @@ requires_openai_auth = {requires_openai_auth}
+             LatestSessionLookupMode::StateDbOnly,
+         );
+ 
+@@ -3436,6 +3465,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             filter_cwd,
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ false,
-@@ -3454,0 +3485 @@ requires_openai_auth = {requires_openai_auth}
+         )
+         .await?
+         .expect("expected current-checkout target with worktrees disabled");
+@@ -3452,6 +3482,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             filter_cwd,
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ false,
-@@ -3467,0 +3499 @@ requires_openai_auth = {requires_openai_auth}
+         )
+         .await?
+         .expect("expected project-scoped fork --last target");
+@@ -3465,6 +3496,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             show_all_filter_cwd,
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ false,
-@@ -3515,0 +3548 @@ requires_openai_auth = {requires_openai_auth}
+         )
+         .await?
+         .expect("expected global fork --last target");
+@@ -3513,6 +3545,7 @@ requires_openai_auth = {requires_openai_auth}
+             &config,
+             Some(project_cwd.as_path()),
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ true,
+         )
+         .await?
+         .expect("expected scan-and-repair fallback to find the rollout");
 diff --git a/codex-rs/tui/src/named_session_lookup.rs b/codex-rs/tui/src/named_session_lookup.rs
-index c9ee45892491f09d742e2f087786c4db87afa910..754744bb3ceb6b378a823a6b9d4b651d3d168a20 100644
+index c9ee458..754744b 100644
 --- a/codex-rs/tui/src/named_session_lookup.rs
 +++ b/codex-rs/tui/src/named_session_lookup.rs
-@@ -54 +54 @@ pub(super) async fn lookup(
+@@ -51,7 +51,7 @@ pub(super) async fn lookup(
+     name: &str,
+     collections: &[SessionCollection],
+     source_kind_filters: &[Vec<ThreadSourceKind>],
 -    model_provider: Option<&str>,
 +    model_providers: Option<Vec<String>>,
-@@ -77 +77 @@ pub(super) async fn lookup(
+ ) -> Result<Option<Thread>> {
+     if name.trim().is_empty() {
+         return Ok(None);
+@@ -74,7 +74,7 @@ pub(super) async fn lookup(
+                         limit: Some(100),
+                         sort_key: Some(sort_key),
+                         sort_direction: None,
 -                        model_providers: model_provider.map(|provider| vec![provider.to_string()]),
 +                        model_providers: model_providers.clone(),
+                         source_kinds: Some(source_kinds.clone()),
+                         archived: Some(matches!(collection, SessionCollection::Archived)),
+                         section_id: None,
 diff --git a/codex-rs/tui/src/resume_picker.rs b/codex-rs/tui/src/resume_picker.rs
-index 5a976e468d28272a101167ec6603d18c8a9a7cb6..c83466c382f7dd05a3b44cfa4254d82556f04157 100644
+index 5a976e4..c83466c 100644
 --- a/codex-rs/tui/src/resume_picker.rs
 +++ b/codex-rs/tui/src/resume_picker.rs
-@@ -444 +444,3 @@ async fn run_resume_picker_with_launch_context(
+@@ -441,7 +441,9 @@ async fn run_resume_picker_with_launch_context(
+         app_server.remote_cwd_override(),
+     );
+     let local_filter_cwd = local_picker_cwd_filter(&cwd_filter, uses_remote_filesystem);
 -    let provider_filter = picker_provider_filter(config, uses_remote_workspace);
 +    // Resume can take over a transcript created by any launcher. The selected
 +    // thread is resumed with this launcher's current model/provider settings.
 +    let provider_filter = ProviderFilter::Any;
-@@ -2063 +2065,3 @@ fn thread_list_params(
+     let runtime_keymap = picker_runtime_keymap(local_settings)?;
+     let options = SessionPickerRunOptions {
+         use_theme_colors: local_settings.tui.status_line_use_colors,
+@@ -2060,7 +2062,9 @@ fn thread_list_params(
+         sort_key: Some(sort_key),
+         sort_direction: None,
+         model_providers: match provider_filter {
 -            ProviderFilter::Any => None,
 +            // thread/list interprets `null` as the server's configured default provider.
 +            // An explicitly empty list is the protocol's no-provider-filter value.
 +            ProviderFilter::Any => Some(Vec::new()),
-@@ -3871,0 +3876 @@ mod tests {
+             ProviderFilter::MatchDefault(default_provider) => Some(vec![default_provider]),
+         },
+         source_kinds: Some(crate::resume_source_kinds(include_non_interactive)),
+@@ -3869,6 +3873,7 @@ mod tests {
+             &config,
+             Some(&primary),
+             /*include_non_interactive*/ false,
 +            /*include_all_providers*/ false,
-@@ -3882,0 +3888 @@ mod tests {
+             crate::LatestSessionLookupMode::StateDbOnly,
+         );
+         assert!(matches!(local.cwd, Some(ThreadListCwdFilter::Many(_))));
+@@ -3880,6 +3885,7 @@ mod tests {
+                 &config,
+                 Some(&primary),
+                 /*include_non_interactive*/ false,
 +                /*include_all_providers*/ false,
-@@ -4299 +4305 @@ mod tests {
+                 crate::LatestSessionLookupMode::StateDbOnly,
+             ),
+             local
+@@ -4296,7 +4302,7 @@ mod tests {
+     }
+ 
+     #[test]
 -    fn remote_thread_list_params_omit_provider_filter() {
 +    fn thread_list_params_request_all_providers_explicitly() {
-@@ -4311 +4317 @@ mod tests {
+         let params = thread_list_params(
+             Some(String::from("cursor-1")),
+             Some(ThreadListCwdFilter::One("repo/on/server".to_string())),
+@@ -4308,7 +4314,7 @@ mod tests {
+         );
+ 
+         assert_eq!(params.cursor, Some(String::from("cursor-1")));
 -        assert_eq!(params.model_providers, None);
 +        assert_eq!(params.model_providers, Some(Vec::new()));
-@@ -4335 +4341 @@ mod tests {
+         assert_eq!(
+             params.source_kinds,
+             Some(vec![ThreadSourceKind::Cli, ThreadSourceKind::VsCode])
+@@ -4332,7 +4338,7 @@ mod tests {
+         );
+ 
+         assert_eq!(params.cursor, Some(String::from("cursor-1")));
 -        assert_eq!(params.model_providers, None);
 +        assert_eq!(params.model_providers, Some(Vec::new()));
+         let source_kinds = crate::resume_source_kinds(/*include_non_interactive*/ true);
+         assert_eq!(params.source_kinds, Some(source_kinds));
+     }
 diff --git a/codex-rs/tui/src/worktree_startup.rs b/codex-rs/tui/src/worktree_startup.rs
-index a3e1f3b3a46d6d79d0c0c9ded201226472efbd78..0b4e451e1ee995e1719d074ac4c3533f9b06f56d 100644
+index a3e1f3b..0b4e451 100644
 --- a/codex-rs/tui/src/worktree_startup.rs
 +++ b/codex-rs/tui/src/worktree_startup.rs
-@@ -171,3 +171,8 @@ pub(super) async fn prepare(
+@@ -168,9 +168,14 @@ pub(super) async fn prepare(
+             crate::app_server_session::ThreadParamsMode::Embedded,
+         );
+         let resolved = async {
 -            let target = lookup_session_target_with_app_server(&mut lookup, &source, id_or_name)
 -                .await?
 -                .ok_or_else(|| color_eyre::eyre::eyre!("Session not found: {id_or_name}"))?;
@@ -368,3 +619,6 @@ index a3e1f3b3a46d6d79d0c0c9ded201226472efbd78..0b4e451e1ee995e1719d074ac4c3533f
 +            )
 +            .await?
 +            .ok_or_else(|| color_eyre::eyre::eyre!("Session not found: {id_or_name}"))?;
+             lookup
+                 .thread_read(target.thread_id, /*include_turns*/ false)
+                 .await
