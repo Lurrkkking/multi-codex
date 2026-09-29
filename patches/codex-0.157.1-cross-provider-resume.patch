@@ -1,18 +1,28 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 68900517ab94b3952c535ad06d403f349e9d7533..4d80989b2360441afdf253bcf042b0c309924c9b 100644
+index 68900517ab94b3952c535ad06d403f349e9d7533..9cb9da5cfc2410357994cf8d7cf706890f60de8f 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -936,0 +937,3 @@ impl ModelClient {
-+            // Keep provider-bound encrypted state out of requests sent to other
-+            // providers. This only changes the request copy, not the saved transcript.
+@@ -268,0 +269 @@ pub struct ModelClient {
++    strip_foreign_encrypted_content: bool,
+@@ -544,0 +546 @@ impl ModelClient {
++            strip_foreign_encrypted_content: false,
+@@ -558,0 +561,8 @@ impl ModelClient {
++    pub(crate) fn with_foreign_encrypted_content(
++        mut self,
++        strip_foreign_encrypted_content: bool,
++    ) -> Self {
++        self.strip_foreign_encrypted_content = strip_foreign_encrypted_content;
++        self
++    }
++
+@@ -935,0 +946,45 @@ impl ModelClient {
++        if !is_openai || self.strip_foreign_encrypted_content {
++            // Keep provider-bound encrypted state out of requests sent to another provider.
++            // Cross-provider resume also needs this when the destination is OpenAI: the source
++            // ciphertext can have a valid-looking item ID while being bound to a different ID
++            // internally. This only changes the request copy, not the saved transcript.
 +            input.retain(|item| !matches!(item, ResponseItem::Compaction { .. }));
-@@ -939,6 +942,67 @@ impl ModelClient {
--                if let ResponseItem::FunctionCall {
--                    encrypted_function_args,
--                    ..
--                } = item
--                {
--                    *encrypted_function_args = None;
++            for item in &mut input {
 +                match item {
 +                    ResponseItem::FunctionCall {
 +                        encrypted_function_args,
@@ -51,6 +61,15 @@ index 68900517ab94b3952c535ad06d403f349e9d7533..4d80989b2360441afdf253bcf042b0c3
 +                }
 +            }
 +        }
+@@ -939,6 +994,31 @@ impl ModelClient {
+-                if let ResponseItem::FunctionCall {
+-                    encrypted_function_args,
+-                    ..
+-                } = item
+-                {
+-                    *encrypted_function_args = None;
++            }
++        }
 +        if is_openai {
 +            // OpenAI validates item IDs against the item type (for example, `rs_` for
 +            // reasoning). Compatible providers can persist generic IDs such as `item_`;
@@ -80,13 +99,45 @@ index 68900517ab94b3952c535ad06d403f349e9d7533..4d80989b2360441afdf253bcf042b0c3
 +                        } => *encrypted_content = None,
 +                        _ => {}
 +                    }
-@@ -955 +1019,5 @@ impl ModelClient {
+@@ -955 +1035,5 @@ impl ModelClient {
 -        let include = vec!["reasoning.encrypted_content".to_string()];
 +        let include = if is_openai {
 +            vec!["reasoning.encrypted_content".to_string()]
 +        } else {
 +            Vec::new()
 +        };
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index da91f5ed346d7e26d7f290b7bae447e97c034715..a342889c693107bcc21bb3261de515f44cee297a 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1727,0 +1728,3 @@ impl Session {
++                .with_foreign_encrypted_content(
++                    initial_history.has_foreign_provider_history(&config.model_provider_id),
++                )
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index 9da17e4cc70e25d051a2e8ba24b468010094dd0f..ec5b1918431ebdf6976079c037ae7873ce582d93 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -372,0 +373,19 @@ impl InitialHistory {
++    /// Returns the provider recorded for the source session, when available.
++    pub fn get_model_provider(&self) -> Option<&str> {
++        self.get_rollout_items().iter().find_map(|item| match item {
++            RolloutItem::SessionMeta(meta_line) => meta_line.meta.model_provider.as_deref(),
++            _ => None,
++        })
++    }
++
++    /// Returns whether restored encrypted history came from another provider.
++    ///
++    /// Old sessions may not record a provider. Treat those histories conservatively because
++    /// encrypted response state is bound to the provider that created it.
++    pub fn has_foreign_provider_history(&self, current_provider: &str) -> bool {
++        matches!(self, Self::Resumed(_) | Self::Forked(_))
++            && self
++                .get_model_provider()
++                .is_none_or(|source_provider| source_provider != current_provider)
++    }
++
 diff --git a/codex-rs/tui/src/app/config_persistence.rs b/codex-rs/tui/src/app/config_persistence.rs
 index d04b74576dfa4f2a81e2b824447bd19137efac06..b5d765468309cff4f556c4989f4fe94cfd563fff 100644
 --- a/codex-rs/tui/src/app/config_persistence.rs
