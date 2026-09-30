@@ -1,27 +1,28 @@
 # Multi Codex
 
-保存多 provider Codex CLI 的可复用源码补丁。本仓库以 OpenAI Codex CLI `0.157.1` 为基线，不保存个人会话或凭据。
+保存多 provider Codex CLI 的可复用源码补丁。本仓库不保存个人会话、凭据或编译产物。
 
 ## 跨 provider 原地恢复
 
-补丁位于 [`patches/codex-0.157.1-cross-provider-resume.patch`](patches/codex-0.157.1-cross-provider-resume.patch)，基于 `openai/codex` 的 `rust-v0.157.1` 标签，基线提交为 `36650394c5b38c2990ccf2a3457165ca3e9d9726`。
+按 Codex 版本选择对应补丁：
 
-它允许 `/resume`、`/resume <名称>` 和 `codex resume --last` 查询其他 provider 创建的会话。恢复时使用当前启动器的 provider 和模型，沿用原 session ID 原地继续，不创建 fork。跨 provider 请求会从请求副本中清理来源 provider 的加密状态，包括 ID 前缀合法但密文仍绑定到其他 item ID 的 reasoning 项；请求序列化时也会移除不属于 Responses 输入的 `reasoning.content`，并在恢复到 OpenAI 时清除与项目类型不匹配的历史 item ID（例如通用的 `item_…`）。本地会话记录本身不会被改写。
+- 当前版本 `0.159.2`：[`codex-0.159.2-cross-provider-resume.patch`](patches/codex-0.159.2-cross-provider-resume.patch)，基于 `rust-v0.159.2`，基线提交 `ff6aec96948b70d94983af2641a6b67c94faeff5`。
+- 旧版本 `0.157.1`：[`codex-0.157.1-cross-provider-resume.patch`](patches/codex-0.157.1-cross-provider-resume.patch)，基于 `rust-v0.157.1`，基线提交 `36650394c5b38c2990ccf2a3457165ca3e9d9726`。
 
-会话列表仍沿用 Codex 的工作目录筛选行为；需要查看其他工作目录的会话时使用 picker 的全局显示选项。
+补丁让 `/resume`、`/resume <名称>` 和 `codex resume --last` 查找其他 provider 创建的会话，并用当前启动器的 provider 和模型沿用原 session ID 继续。请求副本会清理来源 provider 的加密状态、Responses 输入不接受的 `reasoning.content`，以及 OpenAI 不接受的历史 item ID；本地会话记录不会被改写。
 
-## 从基线构建
+## 从 0.159.2 基线构建
 
 ```sh
-git clone --branch rust-v0.157.1 --depth 1 https://github.com/openai/codex.git codex-0.157.1
-cd codex-0.157.1
-git apply --unidiff-zero /path/to/multi-codex/patches/codex-0.157.1-cross-provider-resume.patch
+git clone --branch rust-v0.159.2 --depth 1 https://github.com/openai/codex.git codex-0.159.2
+cd codex-0.159.2
+git apply /path/to/multi-codex/patches/codex-0.159.2-cross-provider-resume.patch
 cd codex-rs
 cargo build --release -p codex-cli --bin codex
 ```
 
-CLI 和托管 app-server daemon 是分开的可执行文件。安装自建版本时，两处都要更新，再运行 `codex app-server daemon restart`，这样 picker 与实际模型请求会使用同一版代码。多个启动器应共用同一个 `CODEX_HOME`，并通过 profile 选择各自 provider。
+CLI 与托管 app-server daemon 是分开的可执行文件，更新时两处都要安装同一补丁版本，再运行 `codex app-server daemon restart`。所有启动器应共用一个 `CODEX_HOME`，并通过 profile 选择 provider。更新官方 CLI 会覆盖 standalone 二进制；新版本需要移植并重新应用对应补丁。
 
 ## 本地数据
 
-仓库只跟踪源码补丁和文档，不包含 Codex 会话历史、`CODEX_HOME` 数据库、认证信息、构建缓存或编译后的二进制。升级 Codex 基线时，需要检查并移植这份补丁。
+仓库只跟踪源码补丁和文档，不包含会话历史、`CODEX_HOME` 数据库、认证信息、构建缓存或编译后的二进制。
